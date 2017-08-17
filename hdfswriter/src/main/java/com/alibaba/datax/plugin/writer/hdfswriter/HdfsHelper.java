@@ -12,6 +12,8 @@ import org.apache.commons.lang3.tuple.MutablePair;
 import org.apache.hadoop.fs.*;
 import org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat;
 import org.apache.hadoop.hive.ql.io.orc.OrcSerde;
+import org.apache.hadoop.hive.serde2.columnar.BytesRefArrayWritable;
+import org.apache.hadoop.hive.serde2.columnar.BytesRefWritable;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorFactory;
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
@@ -23,6 +25,7 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
@@ -338,6 +341,71 @@ public  class HdfsHelper {
         }
         return codecClass;
     }
+
+    /**
+     * 写rcfile类型文件
+     * @param lineReceiver
+     * @param config
+     * @param
+     * @param taskPluginCollector
+     */
+    public void rcFileStartWrite(RecordReceiver lineReceiver, Configuration config, String fileName,
+                                 TaskPluginCollector taskPluginCollector){
+        List<Configuration>  columns = config.getListConfiguration(Key.COLUMN);
+        String compress = config.getString(Key.COMPRESS, null);
+        List<String> columnNames = getColumnNames(columns);
+        List<ObjectInspector> columnTypeInspectors = getColumnTypeInspectors(columns);
+        StructObjectInspector inspector = (StructObjectInspector)ObjectInspectorFactory
+                .getStandardStructObjectInspector(columnNames, columnTypeInspectors);
+
+        DipRCFileOutputFormat outFormat = new DipRCFileOutputFormat();
+        if(!"NONE".equalsIgnoreCase(compress) && null != compress ) {
+            Class<? extends CompressionCodec> codecClass = getCompressCodec(compress);
+            if (null != codecClass) {
+                outFormat.setOutputCompressorClass(conf, codecClass);
+            }
+        }
+        conf.set("hive.io.rcfile.column.number.conf", String.valueOf(columns.size()));
+        try {
+            RecordWriter writer = outFormat.getRecordWriter(fileSystem, conf, fileName, Reporter.NULL);
+            Record record = null;
+            while ((record = lineReceiver.getFromReader()) != null) {
+                MutablePair<List<Object>, Boolean> transportResult =  transportOneRecord(record,columns,taskPluginCollector);
+                if (!transportResult.getRight()) {
+                    writer.write(NullWritable.get(), getBytesRefArrayWritable(transportResult.getLeft()));
+                }
+            }
+            writer.close(Reporter.NULL);
+        } catch (Exception e) {
+            String message = String.format("写文件文件[%s]时发生IO异常,请检查您的网络是否正常！", fileName);
+            LOG.error(message);
+            Path path = new Path(fileName);
+            deleteDir(path.getParent());
+            throw DataXException.asDataXException(HdfsWriterErrorCode.Write_FILE_IO_ERROR, e);
+        }
+    }
+
+    /**
+     * BytesRefArrayWritable实际是BytesRefWritable类型的数组，而BytesRefWritable实际为byte数组
+     * @param trlist
+     * @return
+     * @throws UnsupportedEncodingException
+     */
+    public BytesRefArrayWritable getBytesRefArrayWritable(List trlist) throws UnsupportedEncodingException {
+        BytesRefArrayWritable braw = new BytesRefArrayWritable();
+        byte[] byteStr;
+        if(trlist != null) {
+            for(int j = 0; j < trlist.size(); j++) {
+                String s = trlist.get(j).toString();
+                byteStr = s.getBytes("UTF-8");
+                BytesRefWritable brw = new BytesRefWritable();
+                brw.set(byteStr, 0, byteStr.length);
+                braw.set(j, brw);
+            }
+        }
+        return braw;
+    }
+
 
     /**
      * 写orcfile类型文件
